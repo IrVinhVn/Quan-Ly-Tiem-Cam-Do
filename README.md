@@ -95,3 +95,169 @@ Thay vì bắt người dùng tự nhập tay từng ngày, hệ thống chỉ c
 * Hành động này lưu lại vết: *Ngày giờ tạo, Loại biến động ("Giải ngân"), và Dư nợ gốc ban đầu*, làm cơ sở vững chắc cho việc đối soát và tính lãi sau này.
 
 <img width="2560" height="1440" alt="image" src="https://github.com/user-attachments/assets/fe6ed909-0f50-4e32-9c91-665cd826997f" />
+
+## 🧮 Event 2: Tính toán công nợ thời gian thực (Real-time Debt Calculation)
+
+Tính toán chính xác dư nợ là "trái tim" của hệ thống quản lý cầm đồ. Ở Event 2, hệ thống được trang bị các Hàm tự tạo (User-Defined Functions) trong SQL để tự động nội suy số tiền khách hàng phải trả tại bất kỳ thời điểm nào trong tương lai (Target Date), hỗ trợ trừ lùi dư nợ và tự động chuyển đổi công thức tính lãi.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 200923" src="https://github.com/user-attachments/assets/71b1ee4b-ef94-44c5-8e64-c224f8d35198" />
+
+### 1. Logic xử lý của các Hàm tính toán (Scripts)
+
+Hệ thống cung cấp 2 hàm chính để phục vụ các mục đích truy vấn khác nhau:
+
+* **Tính tiền theo kỳ trả góp (`fn_CalcMoneyTransaction`):**
+  * **Mục đích:** Truy xuất nhanh số tiền cần đóng của một kỳ hạn cụ thể.
+  * **Logic:** Hàm sẽ kiểm tra trạng thái của kỳ hạn đó. Nếu trạng thái là *"Chưa đóng"*, hệ thống sẽ cộng dồn Tiền gốc phải trả và Tiền lãi phải trả. Nếu khách đã thanh toán, hệ thống an toàn trả về `0đ` để chặn rủi ro thu tiền trùng lặp.
+
+* **Tính Tổng nợ Hợp đồng tích hợp Lãi kép (`fn_CalcMoneyContract`):**
+  * **Mục đích:** Tính tổng dư nợ cuối cùng (bao gồm Gốc + Lãi) của toàn bộ hợp đồng tính đến một ngày bất kỳ.
+  * **Cơ chế Dư nợ giảm dần:** Trước khi tính lãi, hệ thống tự động tổng hợp số tiền gốc khách đã trả trong quá khứ để trừ vào nợ gốc ban đầu. Lãi suất chỉ được tính trên **Dư nợ gốc thực tế**.
+  * **Cơ chế Lãi suất 2 tầng:**
+    * **Tầng 1 (Trước Deadline 1):** Áp dụng công thức **Lãi đơn** cơ bản trên dư nợ hiện tại.
+    * **Tầng 2 (Sau Deadline 1):** Đây là cơ chế phạt nợ xấu. Hệ thống "chốt sổ" số tiền tại mốc Deadline 1 (Gốc còn lại + Lãi đơn cộng dồn). Con số tổng này trở thành *Vốn mới* để đưa vào công thức **Lãi kép** (Lãi mẹ đẻ lãi con) thông qua hàm lũy thừa toán học của SQL.
+
+---
+
+### 2. Kịch bản Kiểm thử (Testing)
+
+Để chứng minh tính chính xác tuyệt đối của thuật toán, hệ thống đã được chạy kiểm thử với 3 kịch bản thực tế dựa trên một hợp đồng giả định (Vay 20 triệu, ngày vay 01/10, Deadline 1 là 30 ngày sau):
+
+1. **Test tính tiền 1 kỳ trả góp:** Giả lập khách có lịch hẹn trả 5 triệu gốc + 1.5 triệu lãi. Hệ thống truy vấn đúng trạng thái và trả về chính xác tổng khoản thu là `6.500.000 VNĐ`.
+2. **Test tính Lãi đơn (Chưa quá hạn):** Truy vấn dư nợ vào ngày thứ 15 của hợp đồng (trước Deadline 1). Hệ thống chỉ áp dụng lãi đơn, trả về tổng nợ là `21.500.000 VNĐ` (Bao gồm 20 triệu gốc + 1.5 triệu tiền lãi 15 ngày).
+3. **Test tính Lãi kép (Đã quá hạn):** Truy vấn dư nợ vào ngày thứ 35 (Trễ hạn 5 ngày so với Deadline 1). Hệ thống tự động gộp 30 ngày lãi đơn vào nợ gốc tạo thành vốn mới, sau đó đánh lãi kép cho 5 ngày trễ hẹn. Kết quả trả về tự động nhảy vọt lên `~23.580.916 VNĐ`, phản ánh đúng sức mạnh của "lãi mẹ đẻ lãi con".
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 200840" src="https://github.com/user-attachments/assets/c6629951-995e-4226-a456-774078915a8a" />
+
+## 💰 Event 3: Xử lý Trả nợ và Hoàn trả tài sản (Payment & Asset Release)
+
+Đây là module xử lý dòng tiền cốt lõi của hệ thống, giải quyết bài toán nghiệp vụ khi khách hàng đến thanh toán nợ (tất toán toàn bộ hoặc trả góp từng phần) và có nhu cầu chuộc lại tài sản.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 202214" src="https://github.com/user-attachments/assets/d22c4a08-4c31-496c-a8f1-f1e598278988" />
+
+### 1. Logic xử lý của Store Procedure (Kịch bản Script)
+
+Hệ thống không đơn thuần chỉ là "cộng trừ tiền" mà được thiết kế với một luồng kiểm tra chặt chẽ gồm 5 bước tự động:
+
+1. **Chặn giao dịch rủi ro (Liquidation Check):** Ngay khi tiếp nhận yêu cầu, hệ thống quét cờ `IsSold` của toàn bộ tài sản trong hợp đồng. Nếu phát hiện tài sản đã bị đem đi thanh lý (do quá hạn mốc Deadline 2), thủ tục sẽ lập tức bị hủy bỏ kèm thông báo từ chối thu tiền và từ chối trả đồ để tránh rủi ro pháp lý.
+2. **Chốt công nợ thời gian thực:** Gọi lại hàm tính lãi (`fn_CalcMoneyContract` ở Event 2) để xác định chính xác đến từng đồng số tiền Gốc + Lãi tính đến đúng ngày khách hàng cầm tiền đến quầy.
+3. **Phân bổ dòng tiền & Chuyển đổi trạng thái:**
+   * **Trường hợp tất toán (Trả đủ 100%):** Trạng thái hợp đồng tự động chuyển thành *"Đã thanh toán đủ"*. Hệ thống phát lệnh "giải phóng", đổi trạng thái toàn bộ tài sản sang *"Đã trả khách"*.
+   * **Trường hợp trả góp (Trả một phần):** Tiền được thu vào để giảm trừ dư nợ. Trạng thái hợp đồng chuyển sang *"Đang trả góp"*.
+4. **Minh bạch hóa dữ liệu (Audit Log):** Mọi giao dịch thu tiền đều được hệ thống tự động lưu vết vào nhật ký (`LICHSUBIENDONG`), ghi rõ *Số tiền khách vừa trả* và *Số dư nợ còn lại* tại khoảnh khắc đó.
+5. **Thuật toán Gợi ý chuộc đồ thông minh:** Đây là tính năng nâng cao. Khi khách mới trả một phần nợ, hệ thống sẽ đánh giá: *"Nếu cho khách lấy món đồ A về, thì giá trị các món đồ còn lại tiệm đang giữ có đủ bù đắp số nợ còn lại không?"*. Nếu **Tổng định giá đồ còn giữ >= Dư nợ hiện tại**, hệ thống sẽ in ra danh sách gợi ý cho phép nhân viên trả món đồ đó cho khách.
+
+---
+
+### 2. Kịch bản Kiểm thử (Testing Scenarios)
+
+Để nghiệm thu tính năng này, hệ thống được chạy qua một kịch bản giao dịch thực tế như sau:
+
+* **Bối cảnh giả định:** Khách hàng có hợp đồng đang nợ tổng cộng 21.500.000 VNĐ. Tài sản đang cầm cố gồm 1 chiếc xe máy (định giá 60 triệu) và 1 chiếc điện thoại (định giá 25 triệu). Khách mang 10.000.000 VNĐ đến cửa hàng xin trả bớt nợ và muốn lấy lại chiếc điện thoại.
+* **Tiến hành Test:** Đưa tham số số tiền trả là 10.000.000 VNĐ vào thủ tục xử lý giao dịch.
+* **Kết quả nghiệm thu (Kỳ vọng & Thực tế khớp nhau):**
+  1. Giao dịch thực hiện thành công, dư nợ hợp đồng giảm xuống còn 11.500.000 VNĐ.
+  2. Trạng thái hợp đồng tự động nhảy từ *"Đang vay"* sang *"Đang trả góp"*.
+  3. Bảng Lịch sử biến động ghi nhận thành công dòng log: Loại biến động là "Thu nợ", số tiền thu 10 triệu, dư nợ hiện tại 11.5 triệu.
+  4. **Hệ thống in ra danh sách gợi ý hợp lệ:** Hệ thống gợi ý hoàn toàn CÓ THỂ trả lại chiếc điện thoại (25 triệu) cho khách. Vì chiếc xe máy giữ lại có giá trị 60 triệu, hoàn toàn vượt mức an toàn so với khoản nợ 11.5 triệu còn lại.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 202356" src="https://github.com/user-attachments/assets/2fb3b841-dfdc-4894-adb0-6a2d77e951fd" />
+
+## 🚩 Event 4: Truy vấn Danh sách Nợ xấu & Dự báo Công nợ (Bad Debt Reporting)
+
+Bên cạnh việc xử lý giao dịch, hệ thống còn đóng vai trò là một công cụ quản trị rủi ro mạnh mẽ. Module báo cáo này giúp chủ cửa hàng tự động xác định các khách hàng vi phạm hợp đồng (quá hạn) và dự báo gánh nặng nợ nần trong tương lai để có phương án thu hồi kịp thời.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 203855" src="https://github.com/user-attachments/assets/2552f2c5-4f59-40e3-ab1a-3448ea386447" />
+
+### 1. Logic xử lý của hệ thống (Script Logic)
+
+Báo cáo này không sử dụng các bảng lưu trữ tĩnh mà được thiết kế dựa trên logic truy vấn động (Dynamic Querying) kết hợp với các hàm tính toán thời gian thực:
+
+* **Bộ lọc thông minh (Advanced Filtering):** Hệ thống quét toàn bộ cơ sở dữ liệu và chỉ trích xuất những hợp đồng thỏa mãn đồng thời hai điều kiện khắt khe: (1) Ngày hiện tại đã vượt quá mốc **Deadline 1** và (2) Trạng thái hợp đồng vẫn đang treo, tức là khác với *"Đã thanh toán đủ"* hoặc *"Đã thanh lý"*.
+* **Tự động tính toán số ngày vi phạm:** Hệ thống sử dụng hàm tính toán thời gian để đo lường chính xác khoảng cách từ ngày khách hàng bắt đầu trễ hạn (Deadline 1) cho đến thời điểm bấm nút chạy báo cáo.
+* **Tái sử dụng Module tính toán (Code Reusability):** Thay vì viết lại công thức tính lãi, thủ tục này gọi trực tiếp hàm `fn_CalcMoneyContract` (đã xây dựng ở Event 2). Điều này đảm bảo tính nhất quán tuyệt đối về số liệu tài chính trên toàn hệ thống.
+* **Khả năng Dự báo tài chính (Forecasting):** Đây là "vũ khí" đắc lực nhất của báo cáo. Bằng cách truyền tham số thời gian là **1 tháng sau** vào hàm tính nợ, hệ thống tự động giả lập và đưa ra con số tổng nợ khách sẽ phải gánh chịu nếu tiếp tục chây ì. 
+
+---
+
+### 2. Kịch bản Kiểm thử (Testing Scenario)
+
+Để nghiệm thu tính chính xác của báo cáo nợ xấu, hệ thống được kiểm thử bằng kịch bản sau:
+
+* **Bối cảnh giả định:** Hệ thống có chứa các hợp đồng cũ (Ví dụ: Khách vay từ tháng 10/2023, chắc chắn đã vượt qua Deadline 1 rất lâu) và vẫn chưa thanh toán nợ.
+* **Tiến hành Test:** Kích hoạt thủ tục xuất báo cáo nợ xấu.
+* **Kết quả nghiệm thu:**
+  1. Dữ liệu trả về hiển thị chính xác danh sách những khách hàng đang nợ quá hạn, bỏ qua các khách hàng trả đúng hạn.
+  2. Cột **"Số ngày quá hạn"** hiển thị con số chính xác dựa trên lịch thực tế của hệ thống.
+  3. Cột **"Tổng tiền hiện tại"** tự động áp dụng công thức Lãi kép, hiển thị số tiền nợ khổng lồ tính đến đúng giây phút truy vấn.
+  4. Cột **"Tổng tiền sau 1 tháng nữa"** tự động nhảy số lớn hơn hẳn so với tiền hiện tại (phản ánh đúng sức mạnh của "lãi mẹ đẻ lãi con" sau 30 ngày tiếp theo).
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 203936" src="https://github.com/user-attachments/assets/f886aa37-2241-44b6-9319-8ba18c9e6083" />
+
+## ⚖️ Event 5: Quản lý Thanh lý Tài sản (Automated Asset Liquidation)
+
+Đây là module tự động hóa cốt lõi của hệ thống, giúp giảm thiểu tối đa thao tác thủ công của con người. Bằng cách sử dụng **Trigger** (Trình kích hoạt tự động), hệ thống có khả năng tự giám sát các mốc thời gian và tự động "nắn" lại trạng thái của hợp đồng cũng như tài sản cho đúng với quy định cầm đồ.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 205421" src="https://github.com/user-attachments/assets/344cc47d-b487-4d78-92c2-bc660951bed3" />
+
+### 1. Logic xử lý của Trigger (Script Logic)
+
+Trigger được thiết lập để bám sát vào các sự kiện cập nhật (`AFTER UPDATE`) trên bảng Hợp đồng. Điểm sáng trong tư duy thiết kế ở đây là **Thứ tự thực thi (Execution Order)**: Hệ thống luôn ưu tiên các quyết định chủ đích của con người trước, sau đó mới đến các rà soát tự động của máy móc.
+
+* **Xử lý ưu tiên (Thao tác thủ công):** Ngay khi hệ thống phát hiện người quản lý chủ động đổi trạng thái hợp đồng thành *"Đã thanh lý"*, nó sẽ lập tức khóa sổ. Toàn bộ tài sản đi kèm đang chờ bán sẽ tự động chuyển sang *"Đã bán thanh lý"*, đồng thời cờ `IsSold` được bật lên để vĩnh viễn chặn mọi nỗ lực đóng tiền chuộc đồ (liên kết với chặn bảo mật ở Event 3).
+* **Rà soát tự động Nợ xấu (Quá Deadline 1):** Nếu hệ thống bị "chạm" vào, nó sẽ tự động quét các hợp đồng đang ở trạng thái *"Đang vay"*. Nếu phát hiện ngày hiện tại đã vượt qua mốc Deadline 1, nó sẽ âm thầm chuyển trạng thái hợp đồng đó thành *"Quá hạn (nợ xấu)"*.
+* **Rà soát tự động Thanh lý (Quá Deadline 2):** Tiếp nối bước trên, hệ thống kiểm tra các hợp đồng *"Quá hạn"*. Nếu phát hiện đã vượt qua mốc Deadline 2 (thời gian ân hạn cuối cùng), nó sẽ lập tức tước quyền bảo lưu tài sản, tự động đổi trạng thái tài sản thành *"Sẵn sàng thanh lý"* để báo hiệu cho chủ tiệm đem bán.
+
+---
+
+### 2. Kịch bản Kiểm thử (Testing Scenarios)
+
+Để chứng minh hệ thống tự động hóa hoạt động chính xác và không bị xung đột, chúng ta tiến hành kiểm thử qua 2 giai đoạn:
+
+#### Phần Test 1: Kiểm thử hệ thống tự động nhận diện "Quá hạn"
+* **Bối cảnh:** Sử dụng một hợp đồng cũ (đã quá cả mốc Deadline 1 và Deadline 2 nhưng trạng thái vẫn đang hiện là "Đang vay"). Tạo một lệnh cập nhật (chạm nhẹ) vào hợp đồng để đánh thức Trigger.
+* **Kết quả nghiệm thu:** 1. Trạng thái Hợp đồng tự động nhảy từ *"Đang vay"* sang *"Quá hạn (nợ xấu)"*.
+    2. Trạng thái Tài sản lập tức chuyển thành *"Sẵn sàng thanh lý"*.
+    3. Hệ thống quét tự động thành công mà không cần ai phải dò từng ngày.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 205443" src="https://github.com/user-attachments/assets/a603a825-323e-4660-a250-60495784ea10" />
+
+#### Phần Test 2: Kiểm thử lệnh chốt "Thanh lý tài sản"
+* **Bối cảnh:** Đối với hợp đồng đã ở trạng thái *"Quá hạn"* và tài sản đang *"Sẵn sàng thanh lý"* (kết quả từ phần Test 1), người quản lý ra quyết định bán đồ và cập nhật trạng thái hợp đồng thành *"Đã thanh lý"*.
+* **Kết quả nghiệm thu:**
+    1. Trạng thái Hợp đồng ghi nhận thành công là *"Đã thanh lý"*.
+    2. Trigger tóm gọn hành động này, tự động chuyển trạng thái của các tài sản đi kèm thành *"Đã bán thanh lý"*.
+    3. Cờ bảo mật `IsSold` tự động nhảy lên `1` (True).
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 205457" src="https://github.com/user-attachments/assets/a7b1b779-b22b-44e1-a102-d9c8f2775311" />
+
+## 🔄 Các Sự kiện Bổ sung: Gia hạn Hợp đồng & Audit Log (Extension & Audit Trail)
+
+Một hệ thống cầm đồ thực tế không chỉ cứng nhắc thu nợ và thanh lý tài sản, mà còn phải cung cấp các giải pháp linh hoạt cho khách hàng gặp khó khăn tài chính, đồng thời đảm bảo minh bạch tuyệt đối về dòng tiền cho chủ cửa hàng.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 220618" src="https://github.com/user-attachments/assets/c95acb0b-855e-4f2d-b6e1-ffa99b48f540" />
+
+### 1. Logic xử lý của hệ thống (Script Logic)
+
+Module này được chia làm hai mũi nhọn giải quyết hai vấn đề cốt lõi của quản trị cơ sở dữ liệu tài chính:
+
+* **Nâng cấp Audit Log (Dấu vết dòng tiền):** Khắc phục triệt để rủi ro thất thoát dữ liệu bằng nguyên tắc **"Không bao giờ ghi đè (No Overwrite)"**. Thay vì chỉ cập nhật một con số tổng nợ duy nhất, hệ thống lưu lại mọi biến động thành từng dòng riêng biệt trong bảng Lịch sử (Bao gồm: Ngày giờ, Số tiền trả, Dư nợ còn lại, và đặc biệt là **Mã Nhân viên thu tiền**). Điều này giúp truy xuất chính xác ai là người chịu trách nhiệm cho từng khoản thu.
+* **Xử lý nghiệp vụ Gia hạn Hợp đồng:**
+  * **Chốt chặn tài chính:** Hệ thống tự động tính toán tổng số tiền lãi phát sinh tính đến đúng ngày khách xin gia hạn. Khách bắt buộc phải thanh toán toàn bộ khoản lãi này để được xét duyệt dời ngày.
+  * **Phân bổ dòng tiền:** Số tiền khách đóng được ghi nhận vào Phiếu thu nhưng chỉ được trừ vào "Tiền Lãi", giữ nguyên "Dư nợ Gốc" để tiếp tục tính lãi cho kỳ hạn mới (đảm bảo chuẩn xác về toán học tài chính).
+  * **Tái cơ cấu nợ (Restructuring):** Nếu đóng lãi thành công, hệ thống tự động cộng thêm số ngày gia hạn (ví dụ: 30 ngày) vào các mốc `Deadline 1` và `Deadline 2`. Hợp đồng được "giải cứu", chuyển trạng thái từ *"Quá hạn"* về lại *"Đang vay"*, giúp khách hàng thoát khỏi việc bị tính lãi kép.
+
+---
+
+### 2. Kịch bản Kiểm thử (Testing Scenarios)
+
+Để chứng minh tính an toàn dữ liệu và logic dời ngày, chúng ta thực hiện kịch bản kiểm thử sau:
+
+* **Bối cảnh giả định:** Khách hàng có hợp đồng đang rơi vào trạng thái nợ xấu do quá hạn Deadline 1. Tiền lãi đã cộng dồn lên một con số lớn. Khách mang tiền đến cửa hàng xin đóng trọn phần lãi này để dời kỳ hạn thêm 30 ngày.
+* **Tiến hành Test:** Kích hoạt thủ tục Gia hạn hợp đồng, truyền vào Mã hợp đồng, Mã nhân viên thu tiền và số ngày muốn dời (30 ngày).
+* **Kết quả nghiệm thu:**
+  1. Giao dịch báo thành công, in ra đúng số tiền lãi khách vừa đóng và mốc Deadline mới.
+  2. Truy vấn lại bảng Hợp đồng: Trạng thái đã được reset thành *"Đang vay"*. Mốc Deadline 1 và Deadline 2 đã được tịnh tiến thêm đúng 30 ngày so với trước đó.
+  3. Truy vấn bảng Audit Log: Xuất hiện thêm **một dòng lịch sử mới nhất** ghi nhận hành động "Gia hạn hợp đồng", ghi rõ số tiền lãi đã thu và nhân viên thực hiện. Các dòng lịch sử thu tiền cũ của hợp đồng này vẫn được giữ nguyên vẹn, tạo thành một chuỗi minh bạch.
+
+<img width="2560" height="1440" alt="Screenshot 2026-05-12 220649" src="https://github.com/user-attachments/assets/a02e332d-ba0c-4835-b2a2-f3a93874aa93" />
